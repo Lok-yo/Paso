@@ -22,7 +22,7 @@ npm install
 npx expo start
 ```
 
-Escanea el QR con Expo Go y pulsa **Iniciar seguimiento**. La primera vez, concede el permiso de actividad física si el sistema lo solicita.
+Escanea el QR con Expo Go. Al entrar por primera vez, Paso solicita los permisos de actividad y movimiento; después pulsa **Iniciar seguimiento** para abrir la sesión de conteo.
 
 ## Validación
 

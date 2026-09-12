@@ -170,6 +170,12 @@ function AppContent() {
   }, []);
 
   useEffect(() => {
+    if (Platform.OS !== 'web') {
+      void Pedometer.requestPermissionsAsync()
+        .then(() => Accelerometer.requestPermissionsAsync())
+        .catch(() => undefined);
+    }
+
     return () => {
       pedometerSubscription.current?.remove();
       accelerometerSubscription.current?.remove();
