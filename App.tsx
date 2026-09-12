@@ -1,16 +1,16 @@
 import { Accelerometer, Pedometer } from 'expo-sensors';
 import { StatusBar } from 'expo-status-bar';
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Platform,
   Pressable,
-  SafeAreaView,
   ScrollView,
   StyleSheet,
   Text,
   View,
 } from 'react-native';
+import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 
 const COLORS = {
   background: '#F4F8F5',
@@ -35,6 +35,13 @@ const MOTION_RUNNING_THRESHOLD = 0.17;
 
 type MotionLevel = 'idle' | 'walking' | 'running';
 type SensorSubscription = { remove: () => void };
+type PermissionState = 'granted' | 'denied' | 'undetermined' | 'unknown';
+type AccelerometerReading = {
+  x: number;
+  y: number;
+  z: number;
+  magnitude: number;
+};
 
 function formatDistance(meters: number) {
   if (meters < 1000) return `${Math.round(meters)} m`;
@@ -65,6 +72,27 @@ function motionColor(level: MotionLevel) {
   return COLORS.blue;
 }
 
+function permissionLabel(permission: PermissionState) {
+  if (permission === 'granted') return 'Concedido';
+  if (permission === 'denied') return 'Denegado';
+  if (permission === 'undetermined') return 'Sin solicitar';
+  return 'Sin comprobar';
+}
+
+function availabilityLabel(available: boolean | null) {
+  if (available === null) return 'Comprobando…';
+  return available ? 'Disponible' : 'No disponible';
+}
+
+function debugTime(timestamp: number | null) {
+  if (!timestamp) return 'Sin eventos todavía';
+  return new Date(timestamp).toLocaleTimeString('es-MX', {
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  });
+}
+
 function StatCard({ label, value, detail, tone = 'green' }: {
   label: string;
   value: string;
@@ -84,16 +112,37 @@ function StatCard({ label, value, detail, tone = 'green' }: {
   );
 }
 
-export default function App() {
+function DebugRow({ label, value, tone = 'normal' }: {
+  label: string;
+  value: string;
+  tone?: 'normal' | 'good' | 'bad';
+}) {
+  return (
+    <View style={styles.debugRow}>
+      <Text style={styles.debugLabel}>{label}</Text>
+      <Text style={[styles.debugValue, tone === 'good' && styles.debugGood, tone === 'bad' && styles.debugBad]}>{value}</Text>
+    </View>
+  );
+}
+
+function AppContent() {
   const [steps, setSteps] = useState(0);
   const [motionLevel, setMotionLevel] = useState<MotionLevel>('idle');
   const [motionStrength, setMotionStrength] = useState(0);
   const [isTracking, setIsTracking] = useState(false);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const [pedometerAvailable, setPedometerAvailable] = useState<boolean | null>(Platform.OS === 'web' ? false : null);
+  const [accelerometerAvailable, setAccelerometerAvailable] = useState<boolean | null>(Platform.OS === 'web' ? false : null);
+  const [pedometerPermission, setPedometerPermission] = useState<PermissionState>('unknown');
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [isStarting, setIsStarting] = useState(false);
   const [startedAt, setStartedAt] = useState<number | null>(null);
+  const [showDiagnostics, setShowDiagnostics] = useState(false);
+  const [accelerometerReading, setAccelerometerReading] = useState<AccelerometerReading | null>(null);
+  const [accelerometerEventCount, setAccelerometerEventCount] = useState(0);
+  const [pedometerEventCount, setPedometerEventCount] = useState(0);
+  const [rawPedometerSteps, setRawPedometerSteps] = useState<number | null>(null);
+  const [lastPedometerUpdateAt, setLastPedometerUpdateAt] = useState<number | null>(null);
 
   const pedometerSubscription = useRef<SensorSubscription | null>(null);
   const accelerometerSubscription = useRef<SensorSubscription | null>(null);
@@ -101,25 +150,27 @@ export default function App() {
 
   const distance = steps * METERS_PER_STEP;
 
-  useEffect(() => {
-    let mounted = true;
+  const refreshSensorStatus = useCallback(async () => {
+    if (Platform.OS === 'web') return;
 
-    if (Platform.OS === 'web') {
-      return () => {
-        mounted = false;
-      };
+    try {
+      const [isPedometerAvailable, isAccelerometerAvailable, permission] = await Promise.all([
+        Pedometer.isAvailableAsync(),
+        Accelerometer.isAvailableAsync(),
+        Pedometer.getPermissionsAsync(),
+      ]);
+      setPedometerAvailable(isPedometerAvailable);
+      setAccelerometerAvailable(isAccelerometerAvailable);
+      setPedometerPermission(permission.granted ? 'granted' : permission.status === 'denied' ? 'denied' : 'undetermined');
+    } catch {
+      setPedometerAvailable(false);
+      setAccelerometerAvailable(false);
+      setPedometerPermission('unknown');
     }
+  }, []);
 
-    Promise.all([Pedometer.isAvailableAsync(), Accelerometer.isAvailableAsync()])
-      .then(([isPedometerAvailable, isAccelerometerAvailable]) => {
-        if (mounted) setPedometerAvailable(isPedometerAvailable && isAccelerometerAvailable);
-      })
-      .catch(() => {
-        if (mounted) setPedometerAvailable(false);
-      });
-
+  useEffect(() => {
     return () => {
-      mounted = false;
       pedometerSubscription.current?.remove();
       accelerometerSubscription.current?.remove();
     };
@@ -154,13 +205,16 @@ export default function App() {
         Accelerometer.isAvailableAsync(),
       ]);
 
+      setPedometerAvailable(isPedometerAvailable);
+      setAccelerometerAvailable(isAccelerometerAvailable);
+
       if (!isPedometerAvailable || !isAccelerometerAvailable) {
-        setPedometerAvailable(false);
         setErrorMessage('Este dispositivo no expone un podómetro y acelerómetro compatibles. Prueba en un teléfono físico.');
         return;
       }
 
       const permission = await Pedometer.requestPermissionsAsync();
+      setPedometerPermission(permission.granted ? 'granted' : permission.status === 'denied' ? 'denied' : 'undetermined');
       if (!permission.granted) {
         setErrorMessage('Necesitamos permiso para contar tus pasos. Puedes habilitarlo desde los ajustes del dispositivo.');
         return;
@@ -171,9 +225,17 @@ export default function App() {
       setElapsedSeconds(0);
       setStartedAt(Date.now());
       motionAverage.current = 0;
+      setPedometerEventCount(0);
+      setAccelerometerEventCount(0);
+      setRawPedometerSteps(null);
+      setLastPedometerUpdateAt(null);
+      setAccelerometerReading(null);
 
       pedometerSubscription.current = Pedometer.watchStepCount(({ steps: currentSteps }) => {
         setSteps(currentSteps);
+        setRawPedometerSteps(currentSteps);
+        setPedometerEventCount((count) => count + 1);
+        setLastPedometerUpdateAt(Date.now());
       });
 
       Accelerometer.setUpdateInterval(ACCELEROMETER_INTERVAL_MS);
@@ -184,6 +246,8 @@ export default function App() {
         const average = motionAverage.current;
         const strength = Math.min(1, average / 0.35);
 
+        setAccelerometerReading({ x, y, z, magnitude });
+        setAccelerometerEventCount((count) => count + 1);
         setMotionStrength(strength);
         if (average >= MOTION_RUNNING_THRESHOLD) {
           setMotionLevel('running');
@@ -212,6 +276,14 @@ export default function App() {
 
   const statusLabel = isTracking ? 'EN VIVO' : pedometerAvailable === false ? 'NO DISPONIBLE' : 'LISTO';
   const activeMotionColor = motionColor(motionLevel);
+  const sensorPairAvailable = pedometerAvailable === true && accelerometerAvailable === true;
+  const readingText = accelerometerReading
+    ? `x ${accelerometerReading.x.toFixed(2)} · y ${accelerometerReading.y.toFixed(2)} · z ${accelerometerReading.z.toFixed(2)}`
+    : 'Sin lecturas todavía';
+  const toggleDiagnostics = () => {
+    setShowDiagnostics((visible) => !visible);
+    void refreshSensorStatus();
+  };
 
   return (
     <SafeAreaView style={styles.safeArea}>
@@ -313,6 +385,58 @@ export default function App() {
           </Text>
         </Pressable>
 
+        <Pressable
+          style={({ pressed }) => [styles.debugToggle, pressed && styles.pressed]}
+          onPress={toggleDiagnostics}
+          accessibilityRole="button"
+          accessibilityLabel="Abrir diagnóstico de sensores">
+          <View style={styles.debugToggleLeft}>
+            <View style={styles.debugToggleIcon}><Text style={styles.debugToggleIconText}>⌁</Text></View>
+            <View>
+              <Text style={styles.debugToggleTitle}>Desarrollo</Text>
+              <Text style={styles.debugToggleSubtitle}>Verificar sensores y permisos</Text>
+            </View>
+          </View>
+          <Text style={styles.debugToggleAction}>{showDiagnostics ? 'Ocultar' : 'Abrir'}</Text>
+        </Pressable>
+
+        {showDiagnostics ? (
+          <View style={styles.debugCard}>
+            <View style={styles.debugCardHeader}>
+              <View>
+                <Text style={styles.debugCardTitle}>Diagnóstico en vivo</Text>
+                <Text style={styles.debugCardSubtitle}>Los contadores cambian cuando llega un evento nativo.</Text>
+              </View>
+              <View style={[styles.debugBadge, sensorPairAvailable && styles.debugBadgeGood]}>
+                <View style={[styles.debugBadgeDot, sensorPairAvailable && styles.debugBadgeDotGood]} />
+                <Text style={[styles.debugBadgeText, sensorPairAvailable && styles.debugBadgeTextGood]}>
+                  {sensorPairAvailable ? 'OK' : 'REVISAR'}
+                </Text>
+              </View>
+            </View>
+
+            <View style={styles.debugRows}>
+              <DebugRow label="Podómetro" value={availabilityLabel(pedometerAvailable)} tone={pedometerAvailable ? 'good' : pedometerAvailable === false ? 'bad' : 'normal'} />
+              <DebugRow label="Acelerómetro" value={availabilityLabel(accelerometerAvailable)} tone={accelerometerAvailable ? 'good' : accelerometerAvailable === false ? 'bad' : 'normal'} />
+              <DebugRow label="Permiso de actividad" value={permissionLabel(pedometerPermission)} tone={pedometerPermission === 'granted' ? 'good' : pedometerPermission === 'denied' ? 'bad' : 'normal'} />
+              <DebugRow label="Seguimiento" value={isTracking ? 'Activo' : 'Detenido'} tone={isTracking ? 'good' : 'normal'} />
+              <DebugRow label="Eventos acelerómetro" value={String(accelerometerEventCount)} tone={accelerometerEventCount > 0 ? 'good' : 'normal'} />
+              <DebugRow label="Eventos podómetro" value={String(pedometerEventCount)} tone={pedometerEventCount > 0 ? 'good' : 'normal'} />
+              <DebugRow label="Pasos recibidos del sistema" value={rawPedometerSteps === null ? '—' : String(rawPedometerSteps)} tone={rawPedometerSteps !== null ? 'good' : 'normal'} />
+              <DebugRow label="Último evento de pasos" value={debugTime(lastPedometerUpdateAt)} />
+              <DebugRow label="Lectura acelerómetro" value={readingText} />
+              <DebugRow label="Magnitud total" value={accelerometerReading ? accelerometerReading.magnitude.toFixed(3) : '—'} />
+            </View>
+
+            <Text style={styles.debugHelp}>
+              Para probarlo: pulsa Iniciar, mantén el teléfono contigo y camina entre 20 y 30 pasos. Si suben los eventos del acelerómetro pero los del podómetro se quedan en 0, el sistema no está entregando pasos o el permiso está bloqueado.
+            </Text>
+            <Pressable style={styles.refreshButton} onPress={() => void refreshSensorStatus()}>
+              <Text style={styles.refreshButtonText}>Actualizar disponibilidad y permisos</Text>
+            </Pressable>
+          </View>
+        ) : null}
+
         <View style={styles.noteCard}>
           <Text style={styles.noteIcon}>i</Text>
           <Text style={styles.noteText}>
@@ -321,6 +445,14 @@ export default function App() {
         </View>
       </ScrollView>
     </SafeAreaView>
+  );
+}
+
+export default function App() {
+  return (
+    <SafeAreaProvider>
+      <AppContent />
+    </SafeAreaProvider>
   );
 }
 
@@ -387,6 +519,32 @@ const styles = StyleSheet.create({
   buttonSquare: { width: 11, height: 11, borderRadius: 3, backgroundColor: '#FFE0D7' },
   mainButtonText: { color: '#FFFFFF', fontSize: 14, fontWeight: '900' },
   pressed: { opacity: 0.8, transform: [{ scale: 0.985 }] },
+  debugToggle: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', backgroundColor: COLORS.card, borderWidth: 1, borderColor: COLORS.line, borderRadius: 16, padding: 12, marginTop: 12 },
+  debugToggleLeft: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+  debugToggleIcon: { width: 36, height: 36, borderRadius: 12, backgroundColor: '#EEF2F0', alignItems: 'center', justifyContent: 'center' },
+  debugToggleIconText: { color: COLORS.dark, fontSize: 22, fontWeight: '700' },
+  debugToggleTitle: { color: COLORS.ink, fontSize: 13, fontWeight: '900' },
+  debugToggleSubtitle: { color: COLORS.muted, fontSize: 10, marginTop: 3 },
+  debugToggleAction: { color: COLORS.green, fontSize: 11, fontWeight: '900' },
+  debugCard: { backgroundColor: '#10291F', borderRadius: 18, padding: 16, marginTop: 8 },
+  debugCardHeader: { flexDirection: 'row', alignItems: 'flex-start', justifyContent: 'space-between', gap: 10 },
+  debugCardTitle: { color: '#F2FCF6', fontSize: 16, fontWeight: '900' },
+  debugCardSubtitle: { color: '#9DBDAE', fontSize: 10, lineHeight: 15, marginTop: 4, maxWidth: 235 },
+  debugBadge: { flexDirection: 'row', alignItems: 'center', gap: 5, backgroundColor: 'rgba(216,132,66,0.17)', borderRadius: 99, paddingHorizontal: 8, paddingVertical: 6 },
+  debugBadgeGood: { backgroundColor: 'rgba(189,232,208,0.14)' },
+  debugBadgeDot: { width: 6, height: 6, borderRadius: 3, backgroundColor: COLORS.orange },
+  debugBadgeDotGood: { backgroundColor: COLORS.mint },
+  debugBadgeText: { color: '#F1B382', fontSize: 8, fontWeight: '900', letterSpacing: 0.6 },
+  debugBadgeTextGood: { color: COLORS.mint },
+  debugRows: { borderTopWidth: 1, borderTopColor: 'rgba(189,232,208,0.14)', marginTop: 15 },
+  debugRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 10, minHeight: 30, borderBottomWidth: 1, borderBottomColor: 'rgba(189,232,208,0.09)' },
+  debugLabel: { color: '#9DBDAE', fontSize: 10, flex: 1 },
+  debugValue: { color: '#F2FCF6', fontSize: 10, fontWeight: '800', textAlign: 'right', maxWidth: '62%' },
+  debugGood: { color: COLORS.mint },
+  debugBad: { color: '#F1B382' },
+  debugHelp: { color: '#AFCDBD', fontSize: 10, lineHeight: 16, marginTop: 13 },
+  refreshButton: { alignItems: 'center', justifyContent: 'center', minHeight: 38, borderRadius: 11, backgroundColor: 'rgba(189,232,208,0.13)', marginTop: 13 },
+  refreshButtonText: { color: COLORS.mint, fontSize: 10, fontWeight: '900' },
   noteCard: { flexDirection: 'row', alignItems: 'flex-start', gap: 9, paddingHorizontal: 5, marginTop: 18 },
   noteIcon: { width: 17, height: 17, borderRadius: 9, borderWidth: 1, borderColor: '#AABBB1', color: '#7A8C82', fontSize: 11, fontWeight: '900', textAlign: 'center', lineHeight: 15 },
   noteText: { flex: 1, color: COLORS.muted, fontSize: 11, lineHeight: 17 },
