@@ -196,20 +196,6 @@ function AppContent() {
   }, []);
 
   useEffect(() => {
-    const permissionTimer = Platform.OS === 'web'
-      ? null
-      : setTimeout(() => {
-          void requestSensorPermissions().catch(() => undefined);
-        }, 250);
-
-    return () => {
-      if (permissionTimer) clearTimeout(permissionTimer);
-      pedometerSubscription.current?.remove();
-      accelerometerSubscription.current?.remove();
-    };
-  }, [requestSensorPermissions]);
-
-  useEffect(() => {
     if (!isTracking || !startedAt) return;
     const timer = setInterval(() => {
       setElapsedSeconds(Math.floor((Date.now() - startedAt) / 1000));
@@ -228,7 +214,7 @@ function AppContent() {
     setMotionStrength(0);
   };
 
-  const startTracking = async () => {
+  const startTracking = useCallback(async () => {
     setErrorMessage(null);
     setIsStarting(true);
 
@@ -299,7 +285,21 @@ function AppContent() {
     } finally {
       setIsStarting(false);
     }
-  };
+  }, [requestSensorPermissions]);
+
+  useEffect(() => {
+    if (Platform.OS === 'web') return;
+
+    const trackingTimer = setTimeout(() => {
+      void startTracking();
+    }, 350);
+
+    return () => {
+      clearTimeout(trackingTimer);
+      pedometerSubscription.current?.remove();
+      accelerometerSubscription.current?.remove();
+    };
+  }, [startTracking]);
 
   const toggleTracking = () => {
     if (isTracking) {
@@ -321,6 +321,8 @@ function AppContent() {
       const permission = await requestSensorPermissions();
       if (permission && !permission.granted) {
         setErrorMessage('Android no concedió el permiso de actividad. Revisa Ajustes → Aplicaciones → Expo Go → Permisos → Actividad física.');
+      } else if (permission?.granted) {
+        await startTracking();
       }
     } catch {
       setErrorMessage('No se pudo solicitar el permiso. Ábrelo manualmente desde los ajustes del dispositivo.');
