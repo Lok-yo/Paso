@@ -3,7 +3,6 @@ import { StatusBar } from 'expo-status-bar';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
-  Linking,
   Platform,
   Pressable,
   ScrollView,
@@ -38,14 +37,6 @@ const FALLBACK_STEP_COOLDOWN_MS = 280;
 
 type MotionLevel = 'idle' | 'walking' | 'running';
 type SensorSubscription = { remove: () => void };
-type PermissionState = 'granted' | 'denied' | 'undetermined' | 'unknown';
-type StepSource = 'waiting' | 'system' | 'accelerometer';
-type AccelerometerReading = {
-  x: number;
-  y: number;
-  z: number;
-  magnitude: number;
-};
 
 function formatDistance(meters: number) {
   if (meters < 1000) return `${Math.round(meters)} m`;
@@ -76,33 +67,6 @@ function motionColor(level: MotionLevel) {
   return COLORS.blue;
 }
 
-function permissionLabel(permission: PermissionState) {
-  if (permission === 'granted') return 'Concedido';
-  if (permission === 'denied') return 'Denegado';
-  if (permission === 'undetermined') return 'Sin solicitar';
-  return 'Sin comprobar';
-}
-
-function stepSourceLabel(source: StepSource) {
-  if (source === 'system') return 'Sistema (podómetro)';
-  if (source === 'accelerometer') return 'Respaldo (acelerómetro)';
-  return 'Esperando eventos';
-}
-
-function availabilityLabel(available: boolean | null) {
-  if (available === null) return 'Comprobando…';
-  return available ? 'Disponible' : 'No disponible';
-}
-
-function debugTime(timestamp: number | null) {
-  if (!timestamp) return 'Sin eventos todavía';
-  return new Date(timestamp).toLocaleTimeString('es-MX', {
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-  });
-}
-
 function StatCard({ label, value, detail, tone = 'green' }: {
   label: string;
   value: string;
@@ -122,44 +86,18 @@ function StatCard({ label, value, detail, tone = 'green' }: {
   );
 }
 
-function DebugRow({ label, value, tone = 'normal' }: {
-  label: string;
-  value: string;
-  tone?: 'normal' | 'good' | 'bad';
-}) {
-  return (
-    <View style={styles.debugRow}>
-      <Text style={styles.debugLabel}>{label}</Text>
-      <Text style={[styles.debugValue, tone === 'good' && styles.debugGood, tone === 'bad' && styles.debugBad]}>{value}</Text>
-    </View>
-  );
-}
-
 function AppContent() {
   const [steps, setSteps] = useState(0);
   const [motionLevel, setMotionLevel] = useState<MotionLevel>('idle');
   const [motionStrength, setMotionStrength] = useState(0);
   const [isTracking, setIsTracking] = useState(false);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
-  const [pedometerAvailable, setPedometerAvailable] = useState<boolean | null>(Platform.OS === 'web' ? false : null);
-  const [accelerometerAvailable, setAccelerometerAvailable] = useState<boolean | null>(Platform.OS === 'web' ? false : null);
-  const [pedometerPermission, setPedometerPermission] = useState<PermissionState>('unknown');
-  const [permissionCanAskAgain, setPermissionCanAskAgain] = useState(true);
-  const [permissionBusy, setPermissionBusy] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [isStarting, setIsStarting] = useState(false);
   const [startedAt, setStartedAt] = useState<number | null>(null);
-  const [showDiagnostics, setShowDiagnostics] = useState(false);
-  const [accelerometerReading, setAccelerometerReading] = useState<AccelerometerReading | null>(null);
-  const [accelerometerEventCount, setAccelerometerEventCount] = useState(0);
-  const [pedometerEventCount, setPedometerEventCount] = useState(0);
-  const [rawPedometerSteps, setRawPedometerSteps] = useState<number | null>(null);
-  const [lastPedometerUpdateAt, setLastPedometerUpdateAt] = useState<number | null>(null);
-  const [stepSource, setStepSource] = useState<StepSource>('waiting');
 
   const pedometerSubscription = useRef<SensorSubscription | null>(null);
   const accelerometerSubscription = useRef<SensorSubscription | null>(null);
-  const permissionRequestActive = useRef(false);
   const motionAverage = useRef(0);
   const previousMovement = useRef(0);
   const previousPreviousMovement = useRef(0);
@@ -168,47 +106,6 @@ function AppContent() {
   const pedometerResponding = useRef(false);
 
   const distance = steps * METERS_PER_STEP;
-
-  const refreshSensorStatus = useCallback(async () => {
-    if (Platform.OS === 'web') return;
-
-    try {
-      const [isPedometerAvailable, isAccelerometerAvailable, permission] = await Promise.all([
-        Pedometer.isAvailableAsync(),
-        Accelerometer.isAvailableAsync(),
-        Pedometer.getPermissionsAsync(),
-      ]);
-      setPedometerAvailable(isPedometerAvailable);
-      setAccelerometerAvailable(isAccelerometerAvailable);
-      setPedometerPermission(permission.granted ? 'granted' : permission.status === 'denied' ? 'denied' : 'undetermined');
-      setPermissionCanAskAgain(permission.canAskAgain);
-    } catch {
-      setPedometerAvailable(false);
-      setAccelerometerAvailable(false);
-      setPedometerPermission('unknown');
-    }
-  }, []);
-
-  const requestSensorPermissions = useCallback(async () => {
-    if (Platform.OS === 'web' || permissionRequestActive.current) return null;
-    permissionRequestActive.current = true;
-
-    try {
-      const currentPermission = await Pedometer.getPermissionsAsync();
-      setPedometerPermission(currentPermission.granted ? 'granted' : currentPermission.status === 'denied' ? 'denied' : 'undetermined');
-      setPermissionCanAskAgain(currentPermission.canAskAgain);
-
-      if (currentPermission.granted || !currentPermission.canAskAgain) return currentPermission;
-
-      const permission = await Pedometer.requestPermissionsAsync();
-      setPedometerPermission(permission.granted ? 'granted' : permission.status === 'denied' ? 'denied' : 'undetermined');
-      setPermissionCanAskAgain(permission.canAskAgain);
-      if (permission.granted) await Accelerometer.requestPermissionsAsync();
-      return permission;
-    } finally {
-      permissionRequestActive.current = false;
-    }
-  }, []);
 
   useEffect(() => {
     if (!isTracking || !startedAt) return;
@@ -232,7 +129,6 @@ function AppContent() {
     setIsTracking(false);
     setMotionLevel('idle');
     setMotionStrength(0);
-    setStepSource('waiting');
   };
 
   const startTracking = useCallback(async () => {
@@ -245,36 +141,9 @@ function AppContent() {
         Accelerometer.isAvailableAsync(),
       ]);
 
-      setPedometerAvailable(isPedometerAvailable);
-      setAccelerometerAvailable(isAccelerometerAvailable);
-
       if (!isAccelerometerAvailable) {
         setErrorMessage('Este dispositivo no expone un acelerómetro compatible. Prueba en un teléfono físico.');
         return;
-      }
-
-      let permission = null;
-      try {
-        permission = await requestSensorPermissions();
-      } catch {
-        // El conteo por acelerómetro puede funcionar aunque el módulo de
-        // actividad física no pueda consultar sus permisos.
-        setPedometerPermission('unknown');
-        setPermissionCanAskAgain(false);
-      }
-      const hasPedometerPermission = permission?.granted === true;
-      if (permission) {
-        setPedometerPermission(permission.granted ? 'granted' : permission.status === 'denied' ? 'denied' : 'undetermined');
-        setPermissionCanAskAgain(permission.canAskAgain);
-      }
-
-      // El acelerómetro no requiere el permiso de actividad física en Android.
-      // Se solicita por compatibilidad con iOS, pero un rechazo no debe detener
-      // el seguimiento ni impedir el conteo aproximado de respaldo.
-      try {
-        await Accelerometer.requestPermissionsAsync();
-      } catch {
-        // Algunos dispositivos no implementan permisos para este sensor.
       }
 
       pedometerSubscription.current?.remove();
@@ -288,22 +157,16 @@ function AppContent() {
       fallbackSteps.current = 0;
       lastFallbackStepAt.current = 0;
       pedometerResponding.current = false;
-      setStepSource(hasPedometerPermission ? 'waiting' : 'accelerometer');
-      setPedometerEventCount(0);
-      setAccelerometerEventCount(0);
-      setRawPedometerSteps(null);
-      setLastPedometerUpdateAt(null);
-      setAccelerometerReading(null);
 
-      if (hasPedometerPermission && isPedometerAvailable) {
-        pedometerSubscription.current = Pedometer.watchStepCount(({ steps: currentSteps }) => {
-          pedometerResponding.current = true;
-          setStepSource('system');
-          setSteps(currentSteps);
-          setRawPedometerSteps(currentSteps);
-          setPedometerEventCount((count) => count + 1);
-          setLastPedometerUpdateAt(Date.now());
-        });
+      if (isPedometerAvailable) {
+        try {
+          pedometerSubscription.current = Pedometer.watchStepCount(({ steps: currentSteps }) => {
+            pedometerResponding.current = true;
+            setSteps(currentSteps);
+          });
+        } catch {
+          // El acelerómetro continúa con su conteo aproximado de respaldo.
+        }
       }
 
       Accelerometer.setUpdateInterval(ACCELEROMETER_INTERVAL_MS);
@@ -322,15 +185,12 @@ function AppContent() {
         if (isMovementPeak && !pedometerResponding.current) {
           fallbackSteps.current += 1;
           lastFallbackStepAt.current = now;
-          setStepSource('accelerometer');
           setSteps(fallbackSteps.current);
         }
 
         previousPreviousMovement.current = previousMovement.current;
         previousMovement.current = average;
 
-        setAccelerometerReading({ x, y, z, magnitude });
-        setAccelerometerEventCount((count) => count + 1);
         setMotionStrength(strength);
         if (average >= MOTION_RUNNING_THRESHOLD) {
           setMotionLevel('running');
@@ -347,7 +207,7 @@ function AppContent() {
     } finally {
       setIsStarting(false);
     }
-  }, [requestSensorPermissions]);
+  }, []);
 
   useEffect(() => {
     if (Platform.OS === 'web') return;
@@ -371,38 +231,8 @@ function AppContent() {
     }
   };
 
-  const handlePermissionAction = async () => {
-    if (pedometerPermission === 'denied' && !permissionCanAskAgain) {
-      await Linking.openSettings();
-      return;
-    }
-
-    setPermissionBusy(true);
-    setErrorMessage(null);
-    try {
-      const permission = await requestSensorPermissions();
-      if (permission && !permission.granted) {
-        setErrorMessage('Android no concedió el permiso de actividad. Revisa Ajustes → Aplicaciones → Expo Go → Permisos → Actividad física.');
-      } else if (permission?.granted) {
-        await startTracking();
-      }
-    } catch {
-      setErrorMessage('No se pudo solicitar el permiso. Ábrelo manualmente desde los ajustes del dispositivo.');
-    } finally {
-      setPermissionBusy(false);
-    }
-  };
-
-  const statusLabel = isTracking ? 'EN VIVO' : pedometerAvailable === false ? 'NO DISPONIBLE' : 'LISTO';
+  const statusLabel = isTracking ? 'EN VIVO' : 'LISTO';
   const activeMotionColor = motionColor(motionLevel);
-  const sensorPairAvailable = accelerometerAvailable === true;
-  const readingText = accelerometerReading
-    ? `x ${accelerometerReading.x.toFixed(2)} · y ${accelerometerReading.y.toFixed(2)} · z ${accelerometerReading.z.toFixed(2)}`
-    : 'Sin lecturas todavía';
-  const toggleDiagnostics = () => {
-    setShowDiagnostics((visible) => !visible);
-    void refreshSensorStatus();
-  };
 
   return (
     <SafeAreaView style={styles.safeArea}>
@@ -435,27 +265,6 @@ function AppContent() {
             <Pressable onPress={() => setErrorMessage(null)} hitSlop={10} accessibilityLabel="Cerrar aviso">
               <Text style={styles.errorClose}>×</Text>
             </Pressable>
-          </View>
-        ) : null}
-
-        {Platform.OS !== 'web' && pedometerPermission !== 'granted' ? (
-          <View style={styles.permissionCard}>
-            <View style={styles.permissionIcon}><Text style={styles.permissionIconText}>✓</Text></View>
-            <View style={styles.permissionContent}>
-              <Text style={styles.permissionTitle}>Permiso del podómetro</Text>
-              <Text style={styles.permissionText}>
-                Android no entregó el permiso del podómetro. Paso mantendrá el acelerómetro activo y usará una estimación de pasos; puedes intentar habilitar «Actividad física» aquí.
-              </Text>
-              <Pressable
-                style={({ pressed }) => [styles.permissionButton, pressed && styles.pressed]}
-                onPress={() => void handlePermissionAction()}
-                disabled={permissionBusy}>
-                {permissionBusy ? <ActivityIndicator size="small" color={COLORS.dark} /> : null}
-                <Text style={styles.permissionButtonText}>
-                  {permissionBusy ? 'Solicitando…' : permissionCanAskAgain ? 'Permitir permisos' : 'Abrir ajustes'}
-                </Text>
-              </Pressable>
-            </View>
           </View>
         ) : null}
 
@@ -525,59 +334,6 @@ function AppContent() {
           </Text>
         </Pressable>
 
-        <Pressable
-          style={({ pressed }) => [styles.debugToggle, pressed && styles.pressed]}
-          onPress={toggleDiagnostics}
-          accessibilityRole="button"
-          accessibilityLabel="Abrir diagnóstico de sensores">
-          <View style={styles.debugToggleLeft}>
-            <View style={styles.debugToggleIcon}><Text style={styles.debugToggleIconText}>⌁</Text></View>
-            <View>
-              <Text style={styles.debugToggleTitle}>Desarrollo</Text>
-              <Text style={styles.debugToggleSubtitle}>Verificar sensores y permisos</Text>
-            </View>
-          </View>
-          <Text style={styles.debugToggleAction}>{showDiagnostics ? 'Ocultar' : 'Abrir'}</Text>
-        </Pressable>
-
-        {showDiagnostics ? (
-          <View style={styles.debugCard}>
-            <View style={styles.debugCardHeader}>
-              <View>
-                <Text style={styles.debugCardTitle}>Diagnóstico en vivo</Text>
-                <Text style={styles.debugCardSubtitle}>Los contadores cambian cuando llega un evento nativo.</Text>
-              </View>
-              <View style={[styles.debugBadge, sensorPairAvailable && styles.debugBadgeGood]}>
-                <View style={[styles.debugBadgeDot, sensorPairAvailable && styles.debugBadgeDotGood]} />
-                <Text style={[styles.debugBadgeText, sensorPairAvailable && styles.debugBadgeTextGood]}>
-                  {sensorPairAvailable ? 'OK' : 'REVISAR'}
-                </Text>
-              </View>
-            </View>
-
-            <View style={styles.debugRows}>
-              <DebugRow label="Podómetro" value={availabilityLabel(pedometerAvailable)} tone={pedometerAvailable ? 'good' : pedometerAvailable === false ? 'bad' : 'normal'} />
-              <DebugRow label="Acelerómetro" value={availabilityLabel(accelerometerAvailable)} tone={accelerometerAvailable ? 'good' : accelerometerAvailable === false ? 'bad' : 'normal'} />
-              <DebugRow label="Permiso de actividad" value={permissionLabel(pedometerPermission)} tone={pedometerPermission === 'granted' ? 'good' : pedometerPermission === 'denied' ? 'bad' : 'normal'} />
-              <DebugRow label="Seguimiento" value={isTracking ? 'Activo' : 'Detenido'} tone={isTracking ? 'good' : 'normal'} />
-              <DebugRow label="Fuente de pasos" value={stepSourceLabel(stepSource)} tone={stepSource !== 'waiting' ? 'good' : 'normal'} />
-              <DebugRow label="Eventos acelerómetro" value={String(accelerometerEventCount)} tone={accelerometerEventCount > 0 ? 'good' : 'normal'} />
-              <DebugRow label="Eventos podómetro" value={String(pedometerEventCount)} tone={pedometerEventCount > 0 ? 'good' : 'normal'} />
-              <DebugRow label="Pasos recibidos del sistema" value={rawPedometerSteps === null ? '—' : String(rawPedometerSteps)} tone={rawPedometerSteps !== null ? 'good' : 'normal'} />
-              <DebugRow label="Último evento de pasos" value={debugTime(lastPedometerUpdateAt)} />
-              <DebugRow label="Lectura acelerómetro" value={readingText} />
-              <DebugRow label="Magnitud total" value={accelerometerReading ? accelerometerReading.magnitude.toFixed(3) : '—'} />
-            </View>
-
-            <Text style={styles.debugHelp}>
-              El seguimiento intenta iniciar automáticamente. Para probarlo, mantén el teléfono en el bolsillo y camina entre 20 y 30 pasos. Si Android no entrega eventos del podómetro, la fuente cambiará a «Respaldo (acelerómetro)» y el conteo será aproximado.
-            </Text>
-            <Pressable style={styles.refreshButton} onPress={() => void refreshSensorStatus()}>
-              <Text style={styles.refreshButtonText}>Actualizar disponibilidad y permisos</Text>
-            </Pressable>
-          </View>
-        ) : null}
-
         <View style={styles.noteCard}>
           <Text style={styles.noteIcon}>i</Text>
           <Text style={styles.noteText}>
@@ -620,14 +376,6 @@ const styles = StyleSheet.create({
   errorIconText: { color: '#FFFFFF', fontSize: 15, fontWeight: '900' },
   errorText: { flex: 1, color: '#8B4B39', fontSize: 12, lineHeight: 17 },
   errorClose: { color: '#A86653', fontSize: 23, fontWeight: '400', lineHeight: 23 },
-  permissionCard: { flexDirection: 'row', alignItems: 'flex-start', gap: 11, backgroundColor: '#FFF8E8', borderWidth: 1, borderColor: '#F0DFC0', borderRadius: 17, padding: 14, marginTop: 18 },
-  permissionIcon: { width: 32, height: 32, borderRadius: 11, backgroundColor: '#F2C976', alignItems: 'center', justifyContent: 'center' },
-  permissionIconText: { color: '#664716', fontSize: 17, fontWeight: '900' },
-  permissionContent: { flex: 1 },
-  permissionTitle: { color: '#664716', fontSize: 13, fontWeight: '900' },
-  permissionText: { color: '#896A36', fontSize: 11, lineHeight: 16, marginTop: 4 },
-  permissionButton: { alignSelf: 'flex-start', flexDirection: 'row', alignItems: 'center', gap: 7, backgroundColor: '#F2C976', borderRadius: 10, paddingHorizontal: 11, paddingVertical: 9, marginTop: 10 },
-  permissionButtonText: { color: COLORS.dark, fontSize: 11, fontWeight: '900' },
   heroCard: { backgroundColor: COLORS.dark, borderRadius: 25, padding: 20, marginTop: 25, overflow: 'hidden' },
   heroOrb: { position: 'absolute', width: 220, height: 220, borderRadius: 110, right: -70, top: -90, backgroundColor: '#245B45', opacity: 0.72 },
   heroTopRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
@@ -668,32 +416,6 @@ const styles = StyleSheet.create({
   buttonSquare: { width: 11, height: 11, borderRadius: 3, backgroundColor: '#FFE0D7' },
   mainButtonText: { color: '#FFFFFF', fontSize: 14, fontWeight: '900' },
   pressed: { opacity: 0.8, transform: [{ scale: 0.985 }] },
-  debugToggle: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', backgroundColor: COLORS.card, borderWidth: 1, borderColor: COLORS.line, borderRadius: 16, padding: 12, marginTop: 12 },
-  debugToggleLeft: { flexDirection: 'row', alignItems: 'center', gap: 10 },
-  debugToggleIcon: { width: 36, height: 36, borderRadius: 12, backgroundColor: '#EEF2F0', alignItems: 'center', justifyContent: 'center' },
-  debugToggleIconText: { color: COLORS.dark, fontSize: 22, fontWeight: '700' },
-  debugToggleTitle: { color: COLORS.ink, fontSize: 13, fontWeight: '900' },
-  debugToggleSubtitle: { color: COLORS.muted, fontSize: 10, marginTop: 3 },
-  debugToggleAction: { color: COLORS.green, fontSize: 11, fontWeight: '900' },
-  debugCard: { backgroundColor: '#10291F', borderRadius: 18, padding: 16, marginTop: 8 },
-  debugCardHeader: { flexDirection: 'row', alignItems: 'flex-start', justifyContent: 'space-between', gap: 10 },
-  debugCardTitle: { color: '#F2FCF6', fontSize: 16, fontWeight: '900' },
-  debugCardSubtitle: { color: '#9DBDAE', fontSize: 10, lineHeight: 15, marginTop: 4, maxWidth: 235 },
-  debugBadge: { flexDirection: 'row', alignItems: 'center', gap: 5, backgroundColor: 'rgba(216,132,66,0.17)', borderRadius: 99, paddingHorizontal: 8, paddingVertical: 6 },
-  debugBadgeGood: { backgroundColor: 'rgba(189,232,208,0.14)' },
-  debugBadgeDot: { width: 6, height: 6, borderRadius: 3, backgroundColor: COLORS.orange },
-  debugBadgeDotGood: { backgroundColor: COLORS.mint },
-  debugBadgeText: { color: '#F1B382', fontSize: 8, fontWeight: '900', letterSpacing: 0.6 },
-  debugBadgeTextGood: { color: COLORS.mint },
-  debugRows: { borderTopWidth: 1, borderTopColor: 'rgba(189,232,208,0.14)', marginTop: 15 },
-  debugRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 10, minHeight: 30, borderBottomWidth: 1, borderBottomColor: 'rgba(189,232,208,0.09)' },
-  debugLabel: { color: '#9DBDAE', fontSize: 10, flex: 1 },
-  debugValue: { color: '#F2FCF6', fontSize: 10, fontWeight: '800', textAlign: 'right', maxWidth: '62%' },
-  debugGood: { color: COLORS.mint },
-  debugBad: { color: '#F1B382' },
-  debugHelp: { color: '#AFCDBD', fontSize: 10, lineHeight: 16, marginTop: 13 },
-  refreshButton: { alignItems: 'center', justifyContent: 'center', minHeight: 38, borderRadius: 11, backgroundColor: 'rgba(189,232,208,0.13)', marginTop: 13 },
-  refreshButtonText: { color: COLORS.mint, fontSize: 10, fontWeight: '900' },
   noteCard: { flexDirection: 'row', alignItems: 'flex-start', gap: 9, paddingHorizontal: 5, marginTop: 18 },
   noteIcon: { width: 17, height: 17, borderRadius: 9, borderWidth: 1, borderColor: '#AABBB1', color: '#7A8C82', fontSize: 11, fontWeight: '900', textAlign: 'center', lineHeight: 15 },
   noteText: { flex: 1, color: COLORS.muted, fontSize: 11, lineHeight: 17 },

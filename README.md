@@ -15,14 +15,14 @@ Aplicación móvil de fitness hecha con React Native y Expo. Cuenta los pasos de
 - Un teléfono físico con podómetro y acelerómetro. Los simuladores normalmente no exponen lecturas reales.
 - Expo Go para probar esta primera versión; `expo-sensors` está incluido en Expo Go.
 
-## Desarrollo
+## Ejecutar
 
 ```bash
 npm install
 npx expo start
 ```
 
-Escanea el QR con Expo Go. Al entrar por primera vez, Paso solicita los permisos de actividad y movimiento; después pulsa **Iniciar seguimiento** para abrir la sesión de conteo.
+Escanea el QR con Expo Go. Paso comienza a leer los sensores al abrirse; también puedes usar **Iniciar seguimiento** para comenzar una nueva sesión de conteo.
 
 ## Validación
 
@@ -37,8 +37,8 @@ La vista web sirve para revisar la interfaz, pero los sensores solo funcionan de
 ## Estructura
 
 ```text
-App.tsx       Interfaz, permisos y seguimiento de sensores
-app.json      Configuración de Expo y permiso de movimiento en iOS
+App.tsx       Interfaz y seguimiento de sensores
+app.json      Configuración de Expo
 index.ts      Entrada de la aplicación
 assets/       Iconos generados por la plantilla de Expo
 ```

@@ -22,14 +22,6 @@
     },
     "web": {
       "favicon": "./assets/favicon.png"
-    },
-    "plugins": [
-      [
-        "expo-sensors",
-        {
-          "motionPermission": "Paso usa los sensores de movimiento para contar tus pasos y detectar la intensidad de tu actividad."
-        }
-      ]
-    ]
+    }
   }
 }
