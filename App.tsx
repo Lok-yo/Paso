@@ -3,6 +3,7 @@ import { StatusBar } from 'expo-status-bar';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
+  Linking,
   Platform,
   Pressable,
   ScrollView,
@@ -134,6 +135,8 @@ function AppContent() {
   const [pedometerAvailable, setPedometerAvailable] = useState<boolean | null>(Platform.OS === 'web' ? false : null);
   const [accelerometerAvailable, setAccelerometerAvailable] = useState<boolean | null>(Platform.OS === 'web' ? false : null);
   const [pedometerPermission, setPedometerPermission] = useState<PermissionState>('unknown');
+  const [permissionCanAskAgain, setPermissionCanAskAgain] = useState(true);
+  const [permissionBusy, setPermissionBusy] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [isStarting, setIsStarting] = useState(false);
   const [startedAt, setStartedAt] = useState<number | null>(null);
@@ -146,6 +149,7 @@ function AppContent() {
 
   const pedometerSubscription = useRef<SensorSubscription | null>(null);
   const accelerometerSubscription = useRef<SensorSubscription | null>(null);
+  const permissionRequestActive = useRef(false);
   const motionAverage = useRef(0);
 
   const distance = steps * METERS_PER_STEP;
@@ -162,6 +166,7 @@ function AppContent() {
       setPedometerAvailable(isPedometerAvailable);
       setAccelerometerAvailable(isAccelerometerAvailable);
       setPedometerPermission(permission.granted ? 'granted' : permission.status === 'denied' ? 'denied' : 'undetermined');
+      setPermissionCanAskAgain(permission.canAskAgain);
     } catch {
       setPedometerAvailable(false);
       setAccelerometerAvailable(false);
@@ -169,18 +174,40 @@ function AppContent() {
     }
   }, []);
 
-  useEffect(() => {
-    if (Platform.OS !== 'web') {
-      void Pedometer.requestPermissionsAsync()
-        .then(() => Accelerometer.requestPermissionsAsync())
-        .catch(() => undefined);
+  const requestSensorPermissions = useCallback(async () => {
+    if (Platform.OS === 'web' || permissionRequestActive.current) return null;
+    permissionRequestActive.current = true;
+
+    try {
+      const currentPermission = await Pedometer.getPermissionsAsync();
+      setPedometerPermission(currentPermission.granted ? 'granted' : currentPermission.status === 'denied' ? 'denied' : 'undetermined');
+      setPermissionCanAskAgain(currentPermission.canAskAgain);
+
+      if (currentPermission.granted || !currentPermission.canAskAgain) return currentPermission;
+
+      const permission = await Pedometer.requestPermissionsAsync();
+      setPedometerPermission(permission.granted ? 'granted' : permission.status === 'denied' ? 'denied' : 'undetermined');
+      setPermissionCanAskAgain(permission.canAskAgain);
+      if (permission.granted) await Accelerometer.requestPermissionsAsync();
+      return permission;
+    } finally {
+      permissionRequestActive.current = false;
     }
+  }, []);
+
+  useEffect(() => {
+    const permissionTimer = Platform.OS === 'web'
+      ? null
+      : setTimeout(() => {
+          void requestSensorPermissions().catch(() => undefined);
+        }, 250);
 
     return () => {
+      if (permissionTimer) clearTimeout(permissionTimer);
       pedometerSubscription.current?.remove();
       accelerometerSubscription.current?.remove();
     };
-  }, []);
+  }, [requestSensorPermissions]);
 
   useEffect(() => {
     if (!isTracking || !startedAt) return;
@@ -219,8 +246,10 @@ function AppContent() {
         return;
       }
 
-      const permission = await Pedometer.requestPermissionsAsync();
+      const permission = await requestSensorPermissions();
+      if (!permission) return;
       setPedometerPermission(permission.granted ? 'granted' : permission.status === 'denied' ? 'denied' : 'undetermined');
+      setPermissionCanAskAgain(permission.canAskAgain);
       if (!permission.granted) {
         setErrorMessage('Necesitamos permiso para contar tus pasos. Puedes habilitarlo desde los ajustes del dispositivo.');
         return;
@@ -280,6 +309,26 @@ function AppContent() {
     }
   };
 
+  const handlePermissionAction = async () => {
+    if (pedometerPermission === 'denied' && !permissionCanAskAgain) {
+      await Linking.openSettings();
+      return;
+    }
+
+    setPermissionBusy(true);
+    setErrorMessage(null);
+    try {
+      const permission = await requestSensorPermissions();
+      if (permission && !permission.granted) {
+        setErrorMessage('Android no concedió el permiso de actividad. Revisa Ajustes → Aplicaciones → Expo Go → Permisos → Actividad física.');
+      }
+    } catch {
+      setErrorMessage('No se pudo solicitar el permiso. Ábrelo manualmente desde los ajustes del dispositivo.');
+    } finally {
+      setPermissionBusy(false);
+    }
+  };
+
   const statusLabel = isTracking ? 'EN VIVO' : pedometerAvailable === false ? 'NO DISPONIBLE' : 'LISTO';
   const activeMotionColor = motionColor(motionLevel);
   const sensorPairAvailable = pedometerAvailable === true && accelerometerAvailable === true;
@@ -322,6 +371,27 @@ function AppContent() {
             <Pressable onPress={() => setErrorMessage(null)} hitSlop={10} accessibilityLabel="Cerrar aviso">
               <Text style={styles.errorClose}>×</Text>
             </Pressable>
+          </View>
+        ) : null}
+
+        {Platform.OS !== 'web' && pedometerPermission !== 'granted' ? (
+          <View style={styles.permissionCard}>
+            <View style={styles.permissionIcon}><Text style={styles.permissionIconText}>✓</Text></View>
+            <View style={styles.permissionContent}>
+              <Text style={styles.permissionTitle}>Permiso para contar pasos</Text>
+              <Text style={styles.permissionText}>
+                Paso necesita acceso a la actividad física del teléfono. Android puede llamarlo «Actividad física».
+              </Text>
+              <Pressable
+                style={({ pressed }) => [styles.permissionButton, pressed && styles.pressed]}
+                onPress={() => void handlePermissionAction()}
+                disabled={permissionBusy}>
+                {permissionBusy ? <ActivityIndicator size="small" color={COLORS.dark} /> : null}
+                <Text style={styles.permissionButtonText}>
+                  {permissionBusy ? 'Solicitando…' : permissionCanAskAgain ? 'Permitir permisos' : 'Abrir ajustes'}
+                </Text>
+              </Pressable>
+            </View>
           </View>
         ) : null}
 
@@ -485,6 +555,14 @@ const styles = StyleSheet.create({
   errorIconText: { color: '#FFFFFF', fontSize: 15, fontWeight: '900' },
   errorText: { flex: 1, color: '#8B4B39', fontSize: 12, lineHeight: 17 },
   errorClose: { color: '#A86653', fontSize: 23, fontWeight: '400', lineHeight: 23 },
+  permissionCard: { flexDirection: 'row', alignItems: 'flex-start', gap: 11, backgroundColor: '#FFF8E8', borderWidth: 1, borderColor: '#F0DFC0', borderRadius: 17, padding: 14, marginTop: 18 },
+  permissionIcon: { width: 32, height: 32, borderRadius: 11, backgroundColor: '#F2C976', alignItems: 'center', justifyContent: 'center' },
+  permissionIconText: { color: '#664716', fontSize: 17, fontWeight: '900' },
+  permissionContent: { flex: 1 },
+  permissionTitle: { color: '#664716', fontSize: 13, fontWeight: '900' },
+  permissionText: { color: '#896A36', fontSize: 11, lineHeight: 16, marginTop: 4 },
+  permissionButton: { alignSelf: 'flex-start', flexDirection: 'row', alignItems: 'center', gap: 7, backgroundColor: '#F2C976', borderRadius: 10, paddingHorizontal: 11, paddingVertical: 9, marginTop: 10 },
+  permissionButtonText: { color: COLORS.dark, fontSize: 11, fontWeight: '900' },
   heroCard: { backgroundColor: COLORS.dark, borderRadius: 25, padding: 20, marginTop: 25, overflow: 'hidden' },
   heroOrb: { position: 'absolute', width: 220, height: 220, borderRadius: 110, right: -70, top: -90, backgroundColor: '#245B45', opacity: 0.72 },
   heroTopRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
