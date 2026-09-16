@@ -33,10 +33,13 @@ const METERS_PER_STEP = 0.72;
 const ACCELEROMETER_INTERVAL_MS = 100;
 const MOTION_WALKING_THRESHOLD = 0.055;
 const MOTION_RUNNING_THRESHOLD = 0.17;
+const FALLBACK_STEP_THRESHOLD = 0.08;
+const FALLBACK_STEP_COOLDOWN_MS = 280;
 
 type MotionLevel = 'idle' | 'walking' | 'running';
 type SensorSubscription = { remove: () => void };
 type PermissionState = 'granted' | 'denied' | 'undetermined' | 'unknown';
+type StepSource = 'waiting' | 'system' | 'accelerometer';
 type AccelerometerReading = {
   x: number;
   y: number;
@@ -78,6 +81,12 @@ function permissionLabel(permission: PermissionState) {
   if (permission === 'denied') return 'Denegado';
   if (permission === 'undetermined') return 'Sin solicitar';
   return 'Sin comprobar';
+}
+
+function stepSourceLabel(source: StepSource) {
+  if (source === 'system') return 'Sistema (podómetro)';
+  if (source === 'accelerometer') return 'Respaldo (acelerómetro)';
+  return 'Esperando eventos';
 }
 
 function availabilityLabel(available: boolean | null) {
@@ -146,11 +155,17 @@ function AppContent() {
   const [pedometerEventCount, setPedometerEventCount] = useState(0);
   const [rawPedometerSteps, setRawPedometerSteps] = useState<number | null>(null);
   const [lastPedometerUpdateAt, setLastPedometerUpdateAt] = useState<number | null>(null);
+  const [stepSource, setStepSource] = useState<StepSource>('waiting');
 
   const pedometerSubscription = useRef<SensorSubscription | null>(null);
   const accelerometerSubscription = useRef<SensorSubscription | null>(null);
   const permissionRequestActive = useRef(false);
   const motionAverage = useRef(0);
+  const previousMovement = useRef(0);
+  const previousPreviousMovement = useRef(0);
+  const fallbackSteps = useRef(0);
+  const lastFallbackStepAt = useRef(0);
+  const pedometerResponding = useRef(false);
 
   const distance = steps * METERS_PER_STEP;
 
@@ -209,9 +224,15 @@ function AppContent() {
     pedometerSubscription.current = null;
     accelerometerSubscription.current = null;
     motionAverage.current = 0;
+    previousMovement.current = 0;
+    previousPreviousMovement.current = 0;
+    fallbackSteps.current = 0;
+    lastFallbackStepAt.current = 0;
+    pedometerResponding.current = false;
     setIsTracking(false);
     setMotionLevel('idle');
     setMotionStrength(0);
+    setStepSource('waiting');
   };
 
   const startTracking = useCallback(async () => {
@@ -227,37 +248,63 @@ function AppContent() {
       setPedometerAvailable(isPedometerAvailable);
       setAccelerometerAvailable(isAccelerometerAvailable);
 
-      if (!isPedometerAvailable || !isAccelerometerAvailable) {
-        setErrorMessage('Este dispositivo no expone un podómetro y acelerómetro compatibles. Prueba en un teléfono físico.');
+      if (!isAccelerometerAvailable) {
+        setErrorMessage('Este dispositivo no expone un acelerómetro compatible. Prueba en un teléfono físico.');
         return;
       }
 
-      const permission = await requestSensorPermissions();
-      if (!permission) return;
-      setPedometerPermission(permission.granted ? 'granted' : permission.status === 'denied' ? 'denied' : 'undetermined');
-      setPermissionCanAskAgain(permission.canAskAgain);
-      if (!permission.granted) {
-        setErrorMessage('Necesitamos permiso para contar tus pasos. Puedes habilitarlo desde los ajustes del dispositivo.');
-        return;
+      let permission = null;
+      try {
+        permission = await requestSensorPermissions();
+      } catch {
+        // El conteo por acelerómetro puede funcionar aunque el módulo de
+        // actividad física no pueda consultar sus permisos.
+        setPedometerPermission('unknown');
+        setPermissionCanAskAgain(false);
+      }
+      const hasPedometerPermission = permission?.granted === true;
+      if (permission) {
+        setPedometerPermission(permission.granted ? 'granted' : permission.status === 'denied' ? 'denied' : 'undetermined');
+        setPermissionCanAskAgain(permission.canAskAgain);
       }
 
-      setPedometerAvailable(true);
+      // El acelerómetro no requiere el permiso de actividad física en Android.
+      // Se solicita por compatibilidad con iOS, pero un rechazo no debe detener
+      // el seguimiento ni impedir el conteo aproximado de respaldo.
+      try {
+        await Accelerometer.requestPermissionsAsync();
+      } catch {
+        // Algunos dispositivos no implementan permisos para este sensor.
+      }
+
+      pedometerSubscription.current?.remove();
+      accelerometerSubscription.current?.remove();
       setSteps(0);
       setElapsedSeconds(0);
       setStartedAt(Date.now());
       motionAverage.current = 0;
+      previousMovement.current = 0;
+      previousPreviousMovement.current = 0;
+      fallbackSteps.current = 0;
+      lastFallbackStepAt.current = 0;
+      pedometerResponding.current = false;
+      setStepSource(hasPedometerPermission ? 'waiting' : 'accelerometer');
       setPedometerEventCount(0);
       setAccelerometerEventCount(0);
       setRawPedometerSteps(null);
       setLastPedometerUpdateAt(null);
       setAccelerometerReading(null);
 
-      pedometerSubscription.current = Pedometer.watchStepCount(({ steps: currentSteps }) => {
-        setSteps(currentSteps);
-        setRawPedometerSteps(currentSteps);
-        setPedometerEventCount((count) => count + 1);
-        setLastPedometerUpdateAt(Date.now());
-      });
+      if (hasPedometerPermission && isPedometerAvailable) {
+        pedometerSubscription.current = Pedometer.watchStepCount(({ steps: currentSteps }) => {
+          pedometerResponding.current = true;
+          setStepSource('system');
+          setSteps(currentSteps);
+          setRawPedometerSteps(currentSteps);
+          setPedometerEventCount((count) => count + 1);
+          setLastPedometerUpdateAt(Date.now());
+        });
+      }
 
       Accelerometer.setUpdateInterval(ACCELEROMETER_INTERVAL_MS);
       accelerometerSubscription.current = Accelerometer.addListener(({ x, y, z }) => {
@@ -266,6 +313,21 @@ function AppContent() {
         motionAverage.current = motionAverage.current * 0.82 + dynamicMovement * 0.18;
         const average = motionAverage.current;
         const strength = Math.min(1, average / 0.35);
+        const now = Date.now();
+        const isMovementPeak = previousMovement.current > FALLBACK_STEP_THRESHOLD
+          && previousMovement.current >= previousPreviousMovement.current
+          && previousMovement.current >= average
+          && now - lastFallbackStepAt.current >= FALLBACK_STEP_COOLDOWN_MS;
+
+        if (isMovementPeak && !pedometerResponding.current) {
+          fallbackSteps.current += 1;
+          lastFallbackStepAt.current = now;
+          setStepSource('accelerometer');
+          setSteps(fallbackSteps.current);
+        }
+
+        previousPreviousMovement.current = previousMovement.current;
+        previousMovement.current = average;
 
         setAccelerometerReading({ x, y, z, magnitude });
         setAccelerometerEventCount((count) => count + 1);
@@ -333,7 +395,7 @@ function AppContent() {
 
   const statusLabel = isTracking ? 'EN VIVO' : pedometerAvailable === false ? 'NO DISPONIBLE' : 'LISTO';
   const activeMotionColor = motionColor(motionLevel);
-  const sensorPairAvailable = pedometerAvailable === true && accelerometerAvailable === true;
+  const sensorPairAvailable = accelerometerAvailable === true;
   const readingText = accelerometerReading
     ? `x ${accelerometerReading.x.toFixed(2)} · y ${accelerometerReading.y.toFixed(2)} · z ${accelerometerReading.z.toFixed(2)}`
     : 'Sin lecturas todavía';
@@ -380,9 +442,9 @@ function AppContent() {
           <View style={styles.permissionCard}>
             <View style={styles.permissionIcon}><Text style={styles.permissionIconText}>✓</Text></View>
             <View style={styles.permissionContent}>
-              <Text style={styles.permissionTitle}>Permiso para contar pasos</Text>
+              <Text style={styles.permissionTitle}>Permiso del podómetro</Text>
               <Text style={styles.permissionText}>
-                Paso necesita acceso a la actividad física del teléfono. Android puede llamarlo «Actividad física».
+                Android no entregó el permiso del podómetro. Paso mantendrá el acelerómetro activo y usará una estimación de pasos; puedes intentar habilitar «Actividad física» aquí.
               </Text>
               <Pressable
                 style={({ pressed }) => [styles.permissionButton, pressed && styles.pressed]}
@@ -498,6 +560,7 @@ function AppContent() {
               <DebugRow label="Acelerómetro" value={availabilityLabel(accelerometerAvailable)} tone={accelerometerAvailable ? 'good' : accelerometerAvailable === false ? 'bad' : 'normal'} />
               <DebugRow label="Permiso de actividad" value={permissionLabel(pedometerPermission)} tone={pedometerPermission === 'granted' ? 'good' : pedometerPermission === 'denied' ? 'bad' : 'normal'} />
               <DebugRow label="Seguimiento" value={isTracking ? 'Activo' : 'Detenido'} tone={isTracking ? 'good' : 'normal'} />
+              <DebugRow label="Fuente de pasos" value={stepSourceLabel(stepSource)} tone={stepSource !== 'waiting' ? 'good' : 'normal'} />
               <DebugRow label="Eventos acelerómetro" value={String(accelerometerEventCount)} tone={accelerometerEventCount > 0 ? 'good' : 'normal'} />
               <DebugRow label="Eventos podómetro" value={String(pedometerEventCount)} tone={pedometerEventCount > 0 ? 'good' : 'normal'} />
               <DebugRow label="Pasos recibidos del sistema" value={rawPedometerSteps === null ? '—' : String(rawPedometerSteps)} tone={rawPedometerSteps !== null ? 'good' : 'normal'} />
@@ -507,7 +570,7 @@ function AppContent() {
             </View>
 
             <Text style={styles.debugHelp}>
-              Para probarlo: pulsa Iniciar, mantén el teléfono contigo y camina entre 20 y 30 pasos. Si suben los eventos del acelerómetro pero los del podómetro se quedan en 0, el sistema no está entregando pasos o el permiso está bloqueado.
+              El seguimiento intenta iniciar automáticamente. Para probarlo, mantén el teléfono en el bolsillo y camina entre 20 y 30 pasos. Si Android no entrega eventos del podómetro, la fuente cambiará a «Respaldo (acelerómetro)» y el conteo será aproximado.
             </Text>
             <Pressable style={styles.refreshButton} onPress={() => void refreshSensorStatus()}>
               <Text style={styles.refreshButtonText}>Actualizar disponibilidad y permisos</Text>
